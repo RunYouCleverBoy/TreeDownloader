@@ -26,9 +26,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -58,7 +58,7 @@ class MainActivity : ComponentActivity() {
                 val progress = FileDownloader.downloadProgress.collectAsState()
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Box(modifier = Modifier.fillMaxSize()) {
-                        Screen(innerPadding, preferencesManager) { uri, folder, directoryType ->
+                        Screen(innerPadding, preferencesManager, filenameFormatter("TreeDownload_")) { uri, folder, directoryType ->
                             downloadAllFilesTo(uri, folder, directoryType)
                         }
                         // Linear progress indicator at the bottom
@@ -89,20 +89,25 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Suppress("SameParameterValue")
 @Composable
-private fun Screen(innerPadding: PaddingValues, preferencesManager: PreferencesManager, onDownload: (fromUri: Uri, toFolder: String, directoryType: FileDownloader.DirectoryType) -> Unit = { _, _, _ -> }) {
+private fun Screen(
+    innerPadding: PaddingValues,
+    preferencesManager: PreferencesManager,
+    defaultFilename: String,
+    onDownload: (fromUri: Uri, toFolder: String, directoryType: FileDownloader.DirectoryType) -> Unit = { _, _, _ -> }
+) {
     val savedIp = preferencesManager.ip.collectAsState(initial = "0.0.0.0")
     val savedPort = preferencesManager.port.collectAsState(initial = "8000")
     val savedFolder = preferencesManager.folder.collectAsState(initial = "")
-    
+
     var ip by remember { mutableStateOf(savedIp.value) }
     var port by remember { mutableStateOf(savedPort.value) }
     var targetFolder by remember {
-        val defaultFolder = "Download_" + SimpleDateFormat("yyyyMMddhhmm", Locale.ROOT).format(Date(System.currentTimeMillis()))
+        val defaultFolder = defaultFilename
         mutableStateOf(savedFolder.value.ifEmpty { defaultFolder })
     }
     var directoryType by remember { mutableStateOf(FileDownloader.DirectoryType.DOWNLOADS) }
     var expanded by remember { mutableStateOf(false) }
-    
+
     val scope = rememberCoroutineScope()
 
     // Load saved values when they change from DataStore
@@ -137,7 +142,7 @@ private fun Screen(innerPadding: PaddingValues, preferencesManager: PreferencesM
                 preferencesManager.saveFolder(newFolder)
             }
         }
-        
+
         // Directory type dropdown
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -162,7 +167,7 @@ private fun Screen(innerPadding: PaddingValues, preferencesManager: PreferencesM
                     expanded = expanded,
                     onDismissRequest = { expanded = false }
                 ) {
-                    FileDownloader.DirectoryType.values().forEach { type ->
+                    FileDownloader.DirectoryType.entries.forEach { type ->
                         DropdownMenuItem(
                             text = { Text(type.displayName) },
                             onClick = {
@@ -174,7 +179,7 @@ private fun Screen(innerPadding: PaddingValues, preferencesManager: PreferencesM
                 }
             }
         }
-        
+
         Spacer(Modifier.weight(1f))
         Button(onClick = {
             onDownload(

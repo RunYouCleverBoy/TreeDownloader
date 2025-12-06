@@ -20,11 +20,11 @@ class PreferencesManager(private val context: Context) {
     }
 
     val ip: Flow<String> = context.dataStore.data.map { preferences ->
-        preferences[IP_KEY] ?: "10.0.0.13"
+        preferences[IP_KEY] ?: "0.0.0.0"
     }
 
     val port: Flow<String> = context.dataStore.data.map { preferences ->
-        preferences[PORT_KEY] ?: "1948"
+        preferences[PORT_KEY] ?: "8000"
     }
 
     val folder: Flow<String> = context.dataStore.data.map { preferences ->
