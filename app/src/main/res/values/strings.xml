@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Tree Downloader</string>
+    <string name="ip">IP</string>
+    <string name="port">Port</string>
+    <string name="target_folder">Target</string>
+    <string name="download">Download</string>
+</resources>
