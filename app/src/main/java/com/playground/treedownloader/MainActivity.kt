@@ -14,7 +14,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
@@ -123,64 +126,76 @@ private fun Screen(
         }
     }
 
-    Column(modifier = Modifier.padding(paddingValues = innerPadding), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        FieldLine(Modifier.fillMaxWidth(), stringResource(R.string.ip), KeyboardType.Decimal, ip) { newIp ->
-            ip = newIp
-            scope.launch {
-                preferencesManager.saveIp(newIp)
-            }
-        }
-        FieldLine(Modifier.fillMaxWidth(), stringResource(R.string.port), KeyboardType.Number, port) { newPort ->
-            port = newPort
-            scope.launch {
-                preferencesManager.savePort(newPort)
-            }
-        }
-        FieldLine(Modifier.fillMaxWidth(), stringResource(R.string.target_folder), KeyboardType.Text, targetFolder) { newFolder ->
-            targetFolder = newFolder
-            scope.launch {
-                preferencesManager.saveFolder(newFolder)
-            }
-        }
-
-        // Directory type dropdown
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(paddingValues = innerPadding)
+            .imePadding(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Column(
+            modifier = Modifier.verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(modifier = Modifier.width(100.dp), text = "Directory")
-            ExposedDropdownMenuBox(
-                expanded = expanded,
-                onExpandedChange = { expanded = !expanded }
+            FieldLine(Modifier.fillMaxWidth(), stringResource(R.string.ip), KeyboardType.Decimal, ip) { newIp ->
+                ip = newIp
+                scope.launch {
+                    preferencesManager.saveIp(newIp)
+                }
+            }
+            FieldLine(Modifier.fillMaxWidth(), stringResource(R.string.port), KeyboardType.Number, port) { newPort ->
+                port = newPort
+                scope.launch {
+                    preferencesManager.savePort(newPort)
+                }
+            }
+            FieldLine(Modifier.fillMaxWidth(), stringResource(R.string.target_folder), KeyboardType.Text, targetFolder) { newFolder ->
+                targetFolder = newFolder
+                scope.launch {
+                    preferencesManager.saveFolder(newFolder)
+                }
+            }
+
+            // Directory type dropdown
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                TextField(
-                    readOnly = true,
-                    value = directoryType.displayName,
-                    onValueChange = { },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                    modifier = Modifier
-                        .menuAnchor()
-                        .fillMaxWidth()
-                )
-                ExposedDropdownMenu(
+                Text(modifier = Modifier.width(100.dp), text = "Directory")
+                ExposedDropdownMenuBox(
                     expanded = expanded,
-                    onDismissRequest = { expanded = false }
+                    onExpandedChange = { expanded = !expanded }
                 ) {
-                    FileDownloader.DirectoryType.entries.forEach { type ->
-                        DropdownMenuItem(
-                            text = { Text(type.displayName) },
-                            onClick = {
-                                directoryType = type
-                                expanded = false
-                            }
-                        )
+                    TextField(
+                        readOnly = true,
+                        value = directoryType.displayName,
+                        onValueChange = { },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                        modifier = Modifier
+                            .menuAnchor()
+                            .fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false }
+                    ) {
+                        FileDownloader.DirectoryType.entries.forEach { type ->
+                            DropdownMenuItem(
+                                text = { Text(type.displayName) },
+                                onClick = {
+                                    directoryType = type
+                                    expanded = false
+                                }
+                            )
+                        }
                     }
                 }
             }
         }
 
-        Spacer(Modifier.weight(1f))
+        Spacer(modifier = Modifier.weight(1f))
+
         Button(onClick = {
             onDownload(
                 "http://$ip:$port".toUri(),
