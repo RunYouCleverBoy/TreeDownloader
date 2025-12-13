@@ -1,8 +1,9 @@
 package com.playground.treedownloader
 
+import android.app.DownloadManager
 import android.content.ContentValues
 import android.content.Context
-import android.media.MediaScannerConnection
+import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -10,13 +11,12 @@ import android.provider.MediaStore
 import android.util.Log
 import android.webkit.MimeTypeMap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -34,6 +34,8 @@ object FileDownloader {
 
     private val _downloadProgress = MutableStateFlow(0f)
     val downloadProgress: StateFlow<Float> = _downloadProgress.asStateFlow()
+    
+    private val activeDownloadIds = mutableSetOf<Long>()
 
     suspend fun downloadAllFilesTo(context: Context, uri: Uri, folder: String, directoryType: DirectoryType = DirectoryType.DOWNLOADS) {
         withContext(Dispatchers.IO) {
@@ -57,14 +59,17 @@ object FileDownloader {
                     return@withContext
                 }
 
-                // Recursively download all files from the directory
-                var downloadedFiles = 0
-                downloadDirectory(context, baseUrl, "", downloadDir, directoryType) {
-                    downloadedFiles++
-                    _downloadProgress.value = downloadedFiles.toFloat() / totalFiles
+                // Recursively queue all files for download
+                activeDownloadIds.clear()
+                downloadDirectory(context, baseUrl, "", downloadDir, directoryType, folder)
+
+                // Monitor download progress
+                if (activeDownloadIds.isNotEmpty()) {
+                    monitorDownloads(context, totalFiles)
+                } else {
+                    _downloadProgress.value = 1f
                 }
 
-                _downloadProgress.value = 1f
                 Log.d(TAG, "Download completed. Files saved to: ${downloadDir.absolutePath}")
             } catch (e: Exception) {
                 Log.e(TAG, "Error during download", e)
@@ -110,7 +115,7 @@ object FileDownloader {
         return fileCount
     }
 
-    private suspend fun downloadDirectory(context: Context, baseUrl: String, relativePath: String, targetDir: File, directoryType: DirectoryType, onFileDownloaded: () -> Unit = {}) {
+    private suspend fun downloadDirectory(context: Context, baseUrl: String, relativePath: String, targetDir: File, directoryType: DirectoryType, folder: String) {
         val directoryUrl = if (relativePath.isEmpty()) {
             baseUrl
         } else {
@@ -143,20 +148,18 @@ object FileDownloader {
             if (item.isDirectory) {
                 // Recursively download subdirectory
                 targetFile.mkdirs()
-                downloadDirectory(context, baseUrl, itemPath, targetDir, directoryType, onFileDownloaded)
+                downloadDirectory(context, baseUrl, itemPath, targetDir, directoryType, folder)
             } else {
-                // Download file
+                // Queue file for download using DownloadManager
                 val fileUrl = buildUrl(baseUrl, itemPath)
+                Log.d(TAG, "Queuing download: $itemPath")
 
-                targetFile.parentFile?.mkdirs()
-                Log.d(TAG, "Downloading: $itemPath")
-
-                val success = downloadFileToPath(fileUrl, targetFile, context, directoryType)
-                if (success) {
-                    Log.d(TAG, "Successfully downloaded: $itemPath")
-                    onFileDownloaded()
+                val downloadId = queueDownloadWithManager(context, fileUrl, itemPath, folder, directoryType)
+                if (downloadId != -1L) {
+                    activeDownloadIds.add(downloadId)
+                    Log.d(TAG, "Queued download with ID: $downloadId for: $itemPath")
                 } else {
-                    Log.e(TAG, "Failed to download: $itemPath")
+                    Log.e(TAG, "Failed to queue download: $itemPath")
                 }
             }
         }
@@ -384,203 +387,89 @@ object FileDownloader {
         }
     }
 
-    private suspend fun downloadFileToPath(urlString: String, targetFile: File, context: Context, directoryType: DirectoryType): Boolean {
-        var connection: HttpURLConnection? = null
-        var inputStream: InputStream? = null
-        var outputStream: FileOutputStream? = null
-        var success = false
-
-        try {
-            // Delete existing file to ensure overwrite
-            if (targetFile.exists()) {
-                targetFile.delete()
-            }
-
-            val url = URL(urlString)
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 30000
-            connection.instanceFollowRedirects = true
-            connection.connect()
-
-            val responseCode = connection.responseCode
-            val responseMessage = try {
-                connection.responseMessage ?: "Unknown"
-            } catch (e: Exception) {
-                "Unknown"
-            }
-
-            if (responseCode in 200..299) {
-                inputStream = connection.inputStream
-                outputStream = FileOutputStream(targetFile)
-
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    outputStream.write(buffer, 0, bytesRead)
-                }
-
-                outputStream.flush()
-                success = true
-
-                // Register file with MediaStore so it appears in file pickers
-                registerFileWithMediaStore(context, targetFile, directoryType)
-            } else {
-                // Try to read error stream for debugging
-                val errorBody = try {
-                    connection.errorStream?.use { errorStream ->
-                        errorStream.bufferedReader(Charsets.UTF_8).use { reader ->
-                            reader.readText()
-                        }
-                    } ?: ""
-                } catch (e: Exception) {
-                    "Failed to read error stream: ${e.message}"
-                }
-
-                Log.e(TAG, "HTTP error code: $responseCode, message: $responseMessage, URL: $urlString, target: ${targetFile.absolutePath}")
-                if (errorBody.isNotEmpty()) {
-                    Log.e(TAG, "Error response body: $errorBody")
-                }
-
-                // Delete partial file if it exists
-                if (targetFile.exists()) {
-                    targetFile.delete()
-                }
-                success = false
-            }
+    private fun queueDownloadWithManager(context: Context, urlString: String, relativePath: String, folder: String, directoryType: DirectoryType): Long {
+        return try {
+            val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val request = DownloadManager.Request(Uri.parse(urlString))
+            val fileName = File(relativePath).name
+            val mimeType = getMimeType(relativePath)
+            
+            // Use setDestinationInExternalPublicDir for all Android versions
+            // DownloadManager handles scoped storage (Android 10+) internally
+            request.setDestinationInExternalPublicDir(directoryType.directoryName, "$folder/$relativePath")
+            
+            request.setMimeType(mimeType)
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            request.setTitle(fileName)
+            request.setDescription("Downloading $fileName")
+            
+            downloadManager.enqueue(request)
         } catch (e: Exception) {
-            val responseCode = try {
-                connection?.responseCode ?: -1
-            } catch (ex: Exception) {
-                -1
-            }
-            val responseMessage = try {
-                connection?.responseMessage ?: "N/A"
-            } catch (ex: Exception) {
-                "N/A"
-            }
-
-            Log.e(TAG, "Exception downloading file $urlString to ${targetFile.absolutePath} - Error code: $responseCode, Response message: $responseMessage", e)
-            Log.e(TAG, "Exception type: ${e.javaClass.simpleName}, Message: ${e.message}")
-
-            // Delete partial file on exception
-            try {
-                if (targetFile.exists()) {
-                    targetFile.delete()
-                }
-            } catch (deleteException: Exception) {
-                Log.w(TAG, "Failed to delete partial file ${targetFile.absolutePath}", deleteException)
-            }
-            success = false
-        } finally {
-            try {
-                inputStream?.close()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error closing input stream", e)
-            }
-            try {
-                outputStream?.close()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error closing output stream", e)
-            }
-            connection?.disconnect()
+            Log.e(TAG, "Failed to queue download: $urlString", e)
+            -1L
         }
-
-        return success
     }
-
-    private fun registerFileWithMediaStore(context: Context, file: File, directoryType: DirectoryType) {
-        try {
-            val mimeType = getMimeType(file.name)
-
-            // Use MediaScannerConnection for all Android versions - it's the most reliable
-            // This ensures files appear in file pickers and gallery apps
-            MediaScannerConnection.scanFile(
-                context,
-                arrayOf(file.absolutePath),
-                arrayOf(mimeType),
-                object : MediaScannerConnection.OnScanCompletedListener {
-                    override fun onScanCompleted(path: String?, uri: Uri?) {
-                        if (uri != null) {
-                            Log.d(TAG, "Successfully scanned file: ${file.name} -> $uri")
-                        } else {
-                            Log.w(TAG, "MediaScanner completed but no URI returned for: ${file.name}")
-                        }
-                    }
-                }
-            )
-
-            // For Android 10+, also try to insert into MediaStore directly
-            // This helps ensure immediate visibility
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    
+    private suspend fun monitorDownloads(context: Context, totalFiles: Int) {
+        val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        var completedDownloads = 0
+        
+        while (activeDownloadIds.isNotEmpty()) {
+            val completedIds = mutableListOf<Long>()
+            
+            for (downloadId in activeDownloadIds) {
+                val cursor = downloadManager.query(DownloadManager.Query().setFilterById(downloadId))
                 try {
-                    val basePath = Environment.getExternalStoragePublicDirectory(directoryType.directoryName).absolutePath
-                    val filePath = file.absolutePath
-
-                    if (filePath.startsWith(basePath)) {
-                        val relativePath = filePath.substring(basePath.length)
-                        val pathSegments = relativePath.split("/").filter { it.isNotEmpty() }
-                        val dirPath = if (pathSegments.size > 1) {
-                            pathSegments.dropLast(1).joinToString("/")
-                        } else {
-                            ""
-                        }
-
-                        val contentValues = ContentValues().apply {
-                            put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-                            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                            put(MediaStore.MediaColumns.SIZE, file.length())
-                            if (dirPath.isNotEmpty()) {
-                                put(MediaStore.MediaColumns.RELATIVE_PATH, directoryType.directoryName + "/" + dirPath)
-                            } else {
-                                put(MediaStore.MediaColumns.RELATIVE_PATH, directoryType.directoryName)
+                    if (cursor.moveToFirst()) {
+                        val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                        
+                        when (status) {
+                            DownloadManager.STATUS_SUCCESSFUL -> {
+                                completedDownloads++
+                                completedIds.add(downloadId)
+                                Log.d(TAG, "Download completed: $downloadId")
                             }
-                        }
-
-                        // Use appropriate MediaStore collection based on file type and directory
-                        // Images must go to DCIM or Pictures, not Downloads
-                        val collectionUri = when {
-                            mimeType.startsWith("image/") -> {
-                                // Images must be in DCIM or Pictures
-                                if (directoryType == DirectoryType.DCIM) {
-                                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                                } else {
-                                    // If in Downloads, we can't use Images collection, skip MediaStore insert
-                                    // MediaScannerConnection will handle it
-                                    null
+                            DownloadManager.STATUS_FAILED -> {
+                                val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                                Log.e(TAG, "Download failed: $downloadId, reason: $reason")
+                                completedIds.add(downloadId)
+                            }
+                            DownloadManager.STATUS_PAUSED -> {
+                                Log.d(TAG, "Download paused: $downloadId")
+                            }
+                            DownloadManager.STATUS_RUNNING -> {
+                                val bytesDownloaded = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                                val totalBytes = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                                if (totalBytes > 0) {
+                                    val progress = (bytesDownloaded.toFloat() / totalBytes) * 100f
+                                    Log.d(TAG, "Download progress: $downloadId - ${progress.toInt()}%")
                                 }
                             }
-
-                            mimeType.startsWith("video/") -> {
-                                if (directoryType == DirectoryType.DCIM) {
-                                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                                } else {
-                                    null
-                                }
-                            }
-
-                            mimeType.startsWith("audio/") -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                            else -> MediaStore.Downloads.EXTERNAL_CONTENT_URI
-                        }
-
-                        // Try to insert - if it fails, MediaScannerConnection will handle it
-                        if (collectionUri != null) {
-                            val uri = context.contentResolver.insert(collectionUri, contentValues)
-                            if (uri != null) {
-                                Log.d(TAG, "Also registered in MediaStore: ${file.name} -> $uri")
-                            }
-                        } else {
-                            Log.d(TAG, "Skipping MediaStore insert for ${file.name} (wrong directory for file type)")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "MediaStore insert failed (MediaScanner will handle it): ${file.name}", e)
+                    Log.e(TAG, "Error querying download status: $downloadId", e)
+                    completedIds.add(downloadId)
+                } finally {
+                    cursor.close()
                 }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to register file with MediaStore: ${file.name}", e)
+            
+            // Remove completed downloads from active set
+            activeDownloadIds.removeAll(completedIds)
+            
+            // Update progress
+            if (totalFiles > 0) {
+                _downloadProgress.value = completedDownloads.toFloat() / totalFiles
+            }
+            
+            // Wait before checking again
+            if (activeDownloadIds.isNotEmpty()) {
+                delay(1000) // Check every second
+            }
         }
+        
+        _downloadProgress.value = 1f
     }
 
     private fun getMimeType(fileName: String): String {
